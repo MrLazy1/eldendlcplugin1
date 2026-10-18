@@ -24,6 +24,9 @@
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
+static const uint32_t kDlc[]   = { 2778580, 3655690 };
+static const char*    kNames[] = { "ELDEN RING - Shadow of the Erdtree",
+                                   "ELDEN RING - Tarnished Pack" };
 static const uint32_t kBase    = 1245620;
 static const uint32_t kDlc[]   = { 2778580 };
 static const char*    kNames[] = { "ELDEN RING - Shadow of the Erdtree" };
