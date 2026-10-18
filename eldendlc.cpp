@@ -1,6 +1,7 @@
 // ===========================================================================
-//  eldendlc.cpp -- hardened Shadow of the Erdtree unlock for uc-online2
-//  Works on UnionCrax v1.7.0a and on the LukeWarmSodas fork.
+//  eldendlc.cpp -- DLC unlock for uc-online2
+//  ELDEN RING base 1245620 | DLC 2778580 Shadow of the Erdtree
+//                           | DLC 3655690 Tarnished Pack
 //
 //  The emulator answers "do you own AppId X?" but not "list your DLC".
 //  ELDEN RING enumerates (GetDLCCount / BGetDLCDataByIndex), so it saw
@@ -16,21 +17,23 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <intrin.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
 
 // ---------------------------------------------------------------------------
-// Config
+// Config  -- add new DLC appids to BOTH arrays, keep them index-aligned
 // ---------------------------------------------------------------------------
+static const uint32_t kBase    = 1245620;
 static const uint32_t kDlc[]   = { 2778580, 3655690 };
 static const char*    kNames[] = { "ELDEN RING - Shadow of the Erdtree",
                                    "ELDEN RING - Tarnished Pack" };
-static const uint32_t kBase    = 1245620;
-static const uint32_t kDlc[]   = { 2778580 };
-static const char*    kNames[] = { "ELDEN RING - Shadow of the Erdtree" };
 static const int      kDlcN    = (int)(sizeof(kDlc) / sizeof(kDlc[0]));
+
+static_assert(sizeof(kDlc) / sizeof(kDlc[0]) == sizeof(kNames) / sizeof(kNames[0]),
+              "kDlc and kNames must have the same number of entries");
 
 static bool IsOurs(uint32_t id) {
     for (int i = 0; i < kDlcN; ++i) if (kDlc[i] == id) return true;
@@ -41,6 +44,7 @@ static bool IsOurs(uint32_t id) {
 // Logging -> %TEMP%\eldendlc.log AND <game>\eldendlc.log
 // ---------------------------------------------------------------------------
 static void AppendFile(const char* dir, const char* line) {
+    if (!dir || !dir[0]) return;
     char path[MAX_PATH];
     _snprintf_s(path, MAX_PATH, _TRUNCATE, "%s\\eldendlc.log", dir);
     FILE* f = nullptr;
@@ -66,7 +70,7 @@ static void Log(const char* fmt, ...) {
     GetModuleFileNameA(nullptr, exe, MAX_PATH);
     char* s = strrchr(exe, '\\');
     if (s) *(s + 1) = 0; else exe[0] = 0;
-    if (exe[0]) AppendFile(exe, line);
+    AppendFile(exe, line);
 }
 
 // ---------------------------------------------------------------------------
@@ -141,8 +145,8 @@ static int H_UserHasLicenseForApp(void* self, uint64_t sid, uint32_t id) {
 // Slot table (re-armable: the emulator may overwrite our writes at startup)
 // ---------------------------------------------------------------------------
 struct Slot { void** pslot; void* hook; void* original; const char* name; };
-static Slot  g_slots[8];
-static int   g_slotN = 0;
+static Slot    g_slots[8];
+static int     g_slotN = 0;
 static HMODULE g_steam = nullptr;
 static volatile LONG g_state = 0;
 
@@ -151,22 +155,28 @@ static Slot* FindSlot(void** pslot) {
     return nullptr;
 }
 
+static void* OrigFor(const char* name) {
+    for (int i = 0; i < g_slotN; ++i)
+        if (strcmp(g_slots[i].name, name) == 0) return g_slots[i].original;
+    return nullptr;
+}
+
 static void Arm(void* obj, int index, void* hook, const char* name) {
-    if (!obj) return;
+    if (!obj) { Log("ARM SKIP %s (no interface)", name); return; }
     void** vt = *reinterpret_cast<void***>(obj);
-    if (!vt) return;
+    if (!vt) { Log("ARM SKIP %s (no vtable)", name); return; }
     void** pslot = &vt[index];
 
     Slot* s = FindSlot(pslot);
     if (!s) {
-        if (g_slotN >= 8) return;
+        if (g_slotN >= 8) { Log("ARM SKIP %s (slot table full)", name); return; }
         s = &g_slots[g_slotN++];
         s->pslot = pslot; s->hook = hook; s->original = nullptr; s->name = name;
     }
 
     DWORD old = 0;
     if (!VirtualProtect(pslot, sizeof(void*), PAGE_READWRITE, &old)) {
-        Log("ARM FAILED %s (VirtualProtect)", name); return;
+        Log("ARM FAILED %s (VirtualProtect err %lu)", name, GetLastError()); return;
     }
     void* cur = *pslot;
     if (cur != hook) {
@@ -187,7 +197,7 @@ static void Rearm() {
 
 static void Verify() {
     for (int i = 0; i < g_slotN; ++i)
-        Log("  slot %-24s %s", g_slots[i].name,
+        Log("  slot %-34s %s", g_slots[i].name,
             (*g_slots[i].pslot == g_slots[i].hook) ? "ARMED" : "CLOBBERED");
 }
 
@@ -202,6 +212,19 @@ static void* Resolve(const char* const* names, int n) {
 // ---------------------------------------------------------------------------
 // Install
 // ---------------------------------------------------------------------------
+static void SelfTest(const char* tag, void* apps, void** avt) {
+    char hits[384] = { 0 };
+    for (int i = 0; i < kDlcN; ++i) {
+        char one[96];
+        _snprintf_s(one, sizeof(one), _TRUNCATE, " %u=%d", kDlc[i],
+                    (int)((tBIsDlcInstalled)avt[7])(apps, kDlc[i]));
+        strcat_s(hits, sizeof(hits), one);
+    }
+    Log("%-6s BIsDlcInstalled:%s  GetDLCCount()=%d  BGetDLCDataByIndex(0)=%s",
+        tag, hits, (int)((tGetDLCCount)avt[10])(apps),
+        ((tBGetDLCDataByIndex)avt[11])(apps, 0, nullptr, nullptr, nullptr, 0) ? "true" : "false");
+}
+
 static void Install() {
     if (InterlockedCompareExchange(&g_state, 1, 0) != 0) return;
 
@@ -216,13 +239,9 @@ static void Install() {
 
     if (!apps) { Log("FAILED: ISteamApps not resolved"); g_state = 0; return; }
 
-    // ---- self-test BEFORE touching anything -------------------------------
     void** avt = *reinterpret_cast<void***>(apps);
-    Log("BEFORE  BIsDlcInstalled(%u)=%d  GetDLCCount()=%d",
-        kDlc[0], (int)((tBIsDlcInstalled)avt[7])(apps, kDlc[0]),
-        (int)((tGetDLCCount)avt[10])(apps));
+    SelfTest("BEFORE", apps, avt);
 
-    // ---- arm ---------------------------------------------------------------
     Arm(apps,  6, (void*)&H_BIsSubscribedApp,     "ISteamApps::BIsSubscribedApp");
     Arm(apps,  7, (void*)&H_BIsDlcInstalled,      "ISteamApps::BIsDlcInstalled");
     Arm(apps,  8, (void*)&H_GetEarliestPurchase,  "ISteamApps::GetEarliestPurchase");
@@ -232,21 +251,18 @@ static void Install() {
     if (user) Arm(user, 16, (void*)&H_UserHasLicenseForApp, "ISteamUser::UserHasLicenseForApp");
     else      Log("ISteamUser not resolved - licence check left to the emulator");
 
-    // capture originals for pass-through
-    o_BIsSubscribedApp    = (tBIsSubscribedApp)   g_slots[0].original;
-    o_BIsDlcInstalled     = (tBIsDlcInstalled)    g_slots[1].original;
-    o_GetEarliestPurchase = (tGetEarliestPurchase)g_slots[2].original;
-    o_GetDLCCount         = (tGetDLCCount)        g_slots[3].original;
-    o_BGetDLCDataByIndex  = (tBGetDLCDataByIndex) g_slots[4].original;
-    o_GetAppInstallDir    = (tGetAppInstallDir)   g_slots[5].original;
+    // capture originals by name (immune to slot ordering)
+    o_BIsSubscribedApp    = (tBIsSubscribedApp)   OrigFor("ISteamApps::BIsSubscribedApp");
+    o_BIsDlcInstalled     = (tBIsDlcInstalled)    OrigFor("ISteamApps::BIsDlcInstalled");
+    o_GetEarliestPurchase = (tGetEarliestPurchase)OrigFor("ISteamApps::GetEarliestPurchase");
+    o_GetDLCCount         = (tGetDLCCount)        OrigFor("ISteamApps::GetDLCCount");
+    o_BGetDLCDataByIndex  = (tBGetDLCDataByIndex) OrigFor("ISteamApps::BGetDLCDataByIndex");
+    o_GetAppInstallDir    = (tGetAppInstallDir)   OrigFor("ISteamApps::GetAppInstallDir");
+    o_UserHasLicenseForApp= (tUserHasLicenseForApp)OrigFor("ISteamUser::UserHasLicenseForApp");
 
     Log("armed %d slots", g_slotN);
     Verify();
-
-    // ---- self-test AFTER ---------------------------------------------------
-    Log("AFTER   BIsDlcInstalled(%u)=%d  GetDLCCount()=%d",
-        kDlc[0], (int)((tBIsDlcInstalled)avt[7])(apps, kDlc[0]),
-        (int)((tGetDLCCount)avt[10])(apps));
+    SelfTest("AFTER", apps, avt);
 
     g_state = 2;
 }
